@@ -122,7 +122,7 @@ Whether it's:
 * Documentation improvements
 * Design enhancements
 
-See `CONTRIBUTING.md` for guidelines.
+See `CONTRIBUTING.md` for guidelines. *Coming Soon*
 
 ---
 
