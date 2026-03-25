@@ -23,7 +23,7 @@ No built-in features. No bloat. Just a tiny micro-kernel and a powerful plugin s
 
    ```bash
    npx serve
-````
+```
 
 3. Right-click anywhere on the board to open the **Plugin Manager**
 
@@ -130,5 +130,3 @@ See `CONTRIBUTING.md` for guidelines.
 ## 📄 License
 
 This project is licensed under the **MIT License** — see the `LICENSE` file for details.
-
-```
