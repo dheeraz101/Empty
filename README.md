@@ -1,6 +1,3 @@
-
-
-````markdown
 # 🧩 Blank Board
 
 **A minimal, blank canvas where everything is a plugin.**
@@ -134,12 +131,4 @@ See `CONTRIBUTING.md` for guidelines.
 
 This project is licensed under the **MIT License** — see the `LICENSE` file for details.
 
-```
-
----
-
-If you want, I can also:
-- Add badges (build, license, stars, etc.)
-- Improve branding (logo, color theme)
-- Or make it more GitHub-trending friendly 🚀
 ```
