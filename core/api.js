@@ -101,12 +101,19 @@ export function createApi({ boardEl, bus, storage }) {
 
       if (!pluginContainers.has(currentPluginId)) {
         const div = document.createElement('div');
-        div.className = 'bb-plugin-container';
+        div.className = 'bb-plugin-container bb-plugin-box';
         div.dataset.pluginId = currentPluginId;
         div.style.position = 'absolute';
         div.style.left = '20px';
         div.style.top = '20px';
+        div.style.minWidth = '120px';
+        div.style.minHeight = '80px';
+
         boardEl.appendChild(div);
+
+        // 🔥 AUTO BEHAVIOR
+        this.makeDraggable(div);
+        this.makeResizable(div);
         pluginContainers.set(currentPluginId, div);
       }
 
@@ -407,6 +414,8 @@ export function createApi({ boardEl, bus, storage }) {
       dragHandle.addEventListener('mousedown', dragMouseDown);
 
       function dragMouseDown(e) {
+        if (el.dataset.docked === "true") return;
+
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return;
         e.preventDefault();
         pos3 = e.clientX;
@@ -448,6 +457,8 @@ export function createApi({ boardEl, bus, storage }) {
       el.appendChild(handle);
 
       handle.addEventListener('mousedown', (e) => {
+        if (el.dataset.docked === "true") return;
+        
         e.preventDefault();
         const startX = e.clientX;
         const startY = e.clientY;
