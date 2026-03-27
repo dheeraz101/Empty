@@ -34,7 +34,14 @@ export function setup(api) {
       <div style="display:flex; align-items:center; gap:10px;">
         <span style="font-size:20px;">⚙️</span>
         <div>
-          <div style="font-size:17px; font-weight:700;">Plugin Manager</div>
+          <div style="font-size:17px; font-weight:700; display:flex; align-items:center; gap:10px;">
+            Plugin Manager
+            <a href="https://empty-ad9a3406.mintlify.app/" target="_blank" 
+              style="text-decoration:none;">
+              <img src="https://img.shields.io/badge/docs-open-blue?style=flat&logo=book" 
+                  style="height:18px; border-radius:6px;">
+            </a>
+          </div>
           <div style="font-size:12px; color:#777;">Manage your plugins</div>
         </div>
       </div>
@@ -67,6 +74,29 @@ export function setup(api) {
     <div id="panel-community" class="panel-content" style="display:none;">
       <div id="community-loading" style="padding:60px 20px; text-align:center; color:#777;">Fetching community plugins...</div>
       <div id="community-list" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:16px; padding:0 20px;"></div>
+    </div>
+
+    <!-- Docs Pill -->
+    <div style="padding:16px 24px; border-top:1px solid #2a2a2a; background:#151515; display:flex; justify-content:center;">
+      <a href="https://empty-ad9a3406.mintlify.app/" target="_blank"
+        style="
+          display:inline-flex;
+          align-items:center;
+          gap:8px;
+          padding:10px 18px;
+          border-radius:999px;
+          background:#1f1f1f;
+          border:1px solid #333;
+          color:#ccc;
+          font-size:13.5px;
+          text-decoration:none;
+          transition:all 0.2s;
+        "
+        onmouseover="this.style.background='#262626'; this.style.borderColor='#555'; this.style.color='#fff';"
+        onmouseout="this.style.background='#1f1f1f'; this.style.borderColor='#333'; this.style.color='#ccc';"
+      >
+        📘 Documentation
+      </a>
     </div>
 
     <!-- Manual Install -->
