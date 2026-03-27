@@ -50,6 +50,30 @@ async function bootstrap() {
   // Store loaded plugin modules for teardown
   const pluginModules = new Map();
 
+  // Smart import that handles MIME type issues (raw GitHub URLs serve text/plain)
+  async function importPlugin(url) {
+    try {
+      // First try: direct import (works for jsDelivr, Netlify, local, etc.)
+      return await import(url);
+    } catch (err) {
+      if (err.message?.includes('MIME type') || err.message?.includes('text/plain')) {
+        console.log(`⚠️ MIME issue with ${url}, trying fetch+blob fallback...`);
+        // Second try: fetch as text, create blob URL, import blob
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const code = await res.text();
+        const blob = new Blob([code], { type: 'application/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        try {
+          return await import(blobUrl);
+        } finally {
+          URL.revokeObjectURL(blobUrl);
+        }
+      }
+      throw err;
+    }
+  }
+
   async function loadSinglePlugin(def) {
     try {
       let fullUrl = def.url;
@@ -64,7 +88,7 @@ async function bootstrap() {
 
       console.log(`🔌 Loading plugin: ${fullUrl}`);
 
-      const plugin = await import(fullUrl);
+      const plugin = await importPlugin(fullUrl);
 
       if (!plugin.meta || !plugin.setup) {
         console.warn(`⚠️ Invalid plugin (missing meta or setup): ${def.id}`);
@@ -73,18 +97,12 @@ async function bootstrap() {
 
       console.log(`✅ Loaded → ${plugin.meta.name || def.id} v${plugin.meta.version}`);
 
-      // Set the current plugin so api.container creates the right container
       api._setCurrentPlugin(def.id);
-
       plugin.setup(api);
-
-      // Reset current plugin context
       api._setCurrentPlugin(null);
 
-      // Store module reference for teardown
       pluginModules.set(def.id, plugin);
 
-      // Emit event so other plugins (like Layout) can react
       bus.emit('plugin:loaded', {
         id: def.id,
         meta: plugin.meta,
