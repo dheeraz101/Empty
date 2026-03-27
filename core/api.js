@@ -134,10 +134,10 @@ export function createApi({ boardEl, bus, storage }) {
     removeContainer(pluginId) {
       const container = pluginContainers.get(pluginId);
       if (container) {
-        container.remove();
+        container.replaceWith(); // kills listeners properly
         pluginContainers.delete(pluginId);
       }
-      // Also remove associated styles
+
       const style = pluginStyles.get(pluginId);
       if (style) {
         style.remove();
@@ -442,7 +442,10 @@ export function createApi({ boardEl, bus, storage }) {
 
     // ── Make element resizable ──
     makeResizable(el, { minWidth = 100, minHeight = 100 } = {}) {
+      if (el.querySelector('.bb-resize-handle')) return;
+
       const handle = document.createElement('div');
+      handle.className = 'bb-resize-handle';
       handle.style.cssText = `
         position: absolute;
         right: 0;
@@ -450,10 +453,10 @@ export function createApi({ boardEl, bus, storage }) {
         width: 14px;
         height: 14px;
         cursor: nwse-resize;
-        background: linear-gradient(135deg, transparent 50%, rgba(0,0,0,0.15) 50%);
-        border-radius: 0 0 4px 0;
+        background: linear-gradient(135deg, transparent 50%, rgba(0,0,0,0.2) 50%);
+        z-index: 10;
       `;
-      el.style.position = 'absolute';
+
       el.appendChild(handle);
 
       handle.addEventListener('mousedown', (e) => {
