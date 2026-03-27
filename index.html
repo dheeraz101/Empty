@@ -1,43 +1,40 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A blank board where everything is a plugin.">
-  <meta name="author" content="Dheeraz">
-  <meta name="theme-color" content="#f8f9fa">
-  <meta property="og:title" content="Blank Board">
-  <meta property="og:description" content="A blank board where everything is a plugin.">
-  <meta keywords="blank board, plugin system, web app, open source">
-  <title>Blank Board • Everything is a Plugin</title>
-  <style>
-    :root { --board-bg: #f8f9fa; }
-    body { margin:0; padding:0; font-family: system-ui, sans-serif; overflow:hidden; }
-    #board {
-      width: 100vw;
-      height: 100vh;
-      background: var(--board-bg);
-      position: relative;
-      overflow: auto;
-      background-image: 
-        linear-gradient(#ddd 1px, transparent 1px),
-        linear-gradient(90deg, #ddd 1px, transparent 1px);
-      background-size: 40px 40px;
-    }
-    .plugin-box {
-      position: absolute;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-      border-radius: 8px;
-      background: white;
-      cursor: move;
-      user-select: none;
-    }
-  </style>
-</head>
-<body>
-  <div id="board"></div>
-
-  <!-- Core boots everything -->
-  <script type="module" src="core/core.js"></script>
-</body>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="A blank board where everything is a plugin.">
+    <meta name="author" content="Dheeraz">
+    <meta name="theme-color" content="#f8f9fa">
+    <meta property="og:title" content="Blank Board">
+    <meta property="og:description" content="A blank board where everything is a plugin.">
+    <title>Blank Board • Everything is a Plugin</title>
+    <style>
+      :root { --board-bg: #f8f9fa; }
+      body { margin: 0; padding: 0; font-family: system-ui, sans-serif; overflow: hidden; }
+      #board {
+        width: 100vw;
+        height: 100vh;
+        background: var(--board-bg);
+        position: relative;
+        overflow: auto;
+        background-image:
+          linear-gradient(#ddd 1px, transparent 1px),
+          linear-gradient(90deg, #ddd 1px, transparent 1px);
+        background-size: 40px 40px;
+      }
+      .plugin-box {
+        position: absolute;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        border-radius: 8px;
+        background: white;
+        cursor: move;
+        user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="board"></div>
+    <script type="module" src="core/core.js"></script>
+  </body>
 </html>
