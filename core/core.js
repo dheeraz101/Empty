@@ -51,14 +51,10 @@ async function bootstrap() {
   const pluginModules = new Map();
 
   // Smart import that handles MIME type issues (raw GitHub URLs serve text/plain)
-  async function importPlugin(url) {
-    try {
-      // First try: direct import (works for jsDelivr, Netlify, local, etc.)
-      return await import(url);
-    } catch (err) {
-      if (err.message?.includes('MIME type') || err.message?.includes('text/plain')) {
-        console.log(`⚠️ MIME issue with ${url}, trying fetch+blob fallback...`);
-        // Second try: fetch as text, create blob URL, import blob
+    async function importPlugin(url) {
+      // If cross-origin (GitHub Raw, etc.), always use fetch+blob
+      const sameOrigin = url.startsWith(location.origin);
+      if (!sameOrigin) {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const code = await res.text();
@@ -70,9 +66,10 @@ async function bootstrap() {
           URL.revokeObjectURL(blobUrl);
         }
       }
-      throw err;
+
+      // Same-origin: try normal import first (for local / Netlify plugins)
+      return await import(url);
     }
-  }
 
   async function loadSinglePlugin(def) {
     try {
