@@ -4,9 +4,29 @@ export function createApi({ boardEl, bus, storage }) {
   const hooks = {};
   const pluginContainers = new Map();
   const pluginStyles = new Map();
+  const pluginState = new Map(); // 🔥 NEW: centralized state
+  const pluginPermissions = new Map();
+
   let currentPluginId = null;
 
-  // ── Toolbar ──
+  function setPluginPermissions(pluginId, permissions = {}) {
+    pluginPermissions.set(pluginId, {
+      canMoveOthers: false,
+      canModifyOthers: false,
+      isSystem: false,
+      ...permissions
+    });
+  }
+
+  function hasPermission(pluginId, key) {
+    const perms = pluginPermissions.get(pluginId);
+    return perms?.[key] === true;
+  }
+
+  // ─────────────────────────────────────────────
+  // UI SYSTEMS (UNCHANGED)
+  // ─────────────────────────────────────────────
+
   function getOrCreateToolbar() {
     let toolbar = document.getElementById('bb-toolbar');
     if (!toolbar) {
@@ -30,7 +50,6 @@ export function createApi({ boardEl, bus, storage }) {
     return toolbar;
   }
 
-  // ── Context Menu ──
   function getOrCreateContextMenu() {
     let menu = document.getElementById('bb-context-menu');
     if (!menu) {
@@ -68,7 +87,6 @@ export function createApi({ boardEl, bus, storage }) {
     return menu;
   }
 
-  // ── Sidebar ──
   function getOrCreateSidebar() {
     let sidebar = document.getElementById('bb-sidebar');
     if (!sidebar) {
@@ -88,12 +106,90 @@ export function createApi({ boardEl, bus, storage }) {
     return sidebar;
   }
 
+  // ─────────────────────────────────────────────
+  // 🔥 CORE CONTROL SYSTEM (NEW)
+  // ─────────────────────────────────────────────
+
+  function mountPlugin(pluginId, targetEl) {
+    const el = pluginContainers.get(pluginId);
+    if (!el || !targetEl) return;
+
+    pluginState.set(pluginId, { mode: 'docked', parent: targetEl });
+
+    targetEl.appendChild(el);
+
+    el.dataset.docked = 'true';
+
+    el.style.position = 'relative';
+    el.style.left = '0';
+    el.style.top = '0';
+    el.style.width = '100%';
+    el.style.height = '100%';
+    el.style.transform = 'none';
+    el.style.inset = '0';
+
+    bus.emit('plugin:docked', { pluginId, el, target: targetEl });
+  }
+
+  function undockPlugin(pluginId) {
+    const el = pluginContainers.get(pluginId);
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+
+    boardEl.appendChild(el);
+
+    el.dataset.docked = 'false';
+
+    el.style.position = 'absolute';
+    el.style.left = rect.left + 'px';
+    el.style.top = rect.top + 'px';
+    el.style.width = rect.width + 'px';
+    el.style.height = rect.height + 'px';
+
+    pluginState.set(pluginId, { mode: 'floating' });
+
+    bus.emit('plugin:undocked', { pluginId, el });
+  }
+
+  function updatePlugin(targetPluginId, updater) {
+    const caller = currentPluginId;
+
+    if (caller !== targetPluginId && !hasPermission(caller, 'canModifyOthers')) {
+      console.warn(`[API] ${caller} cannot modify ${targetPluginId}`);
+      return;
+    }
+
+    const el = pluginContainers.get(targetPluginId);
+    if (!el) return;
+
+    try {
+      updater(el);
+      bus.emit('plugin:updated', { pluginId: targetPluginId, el });
+    } catch (err) {
+      console.error('Plugin update failed:', err);
+    }
+  }
+
+  function getPlugin(pluginId) {
+    return pluginContainers.get(pluginId) || null;
+  }
+
+  // ─────────────────────────────────────────────
+  // API RETURN
+  // ─────────────────────────────────────────────
+
   return {
-    version: "3.3.0",
+    version: "4.0.0",
     boardEl,
     bus,
 
-    // ── Enhanced Storage ──
+    // 🔥 NEW CORE METHODS
+    mountPlugin,
+    undockPlugin,
+    updatePlugin,
+    getPlugin,
+
     storage: {
       ...storage,
       getForPlugin: (pluginId, key) => {
@@ -110,7 +206,6 @@ export function createApi({ boardEl, bus, storage }) {
 
     getPluginId: () => currentPluginId,
 
-    // ── Container ──
     get container() {
       if (!currentPluginId) return boardEl;
 
@@ -124,9 +219,8 @@ export function createApi({ boardEl, bus, storage }) {
         div.style.top = '20px';
         div.style.minWidth = '120px';
         div.style.minHeight = '80px';
-        div.style.overflow = 'hidden';        
-        div.style.display = 'flex';             
-        div.style.flexDirection = 'column'; 
+        div.style.display = 'flex';
+        div.style.flexDirection = 'column';
 
         boardEl.appendChild(div);
 
@@ -134,6 +228,7 @@ export function createApi({ boardEl, bus, storage }) {
         this.makeResizable(div);
 
         pluginContainers.set(currentPluginId, div);
+        pluginState.set(currentPluginId, { mode: 'floating' });
       }
 
       return pluginContainers.get(currentPluginId);
@@ -148,40 +243,34 @@ export function createApi({ boardEl, bus, storage }) {
     },
 
     removeContainer(pluginId) {
-      const container = pluginContainers.get(pluginId);
-      if (container) {
-        container.remove();
-        pluginContainers.delete(pluginId);
-      }
+      const el = pluginContainers.get(pluginId);
+      if (el) el.remove();
+      pluginContainers.delete(pluginId);
+      pluginState.delete(pluginId);
+
       const style = pluginStyles.get(pluginId);
-      if (style) {
-        style.remove();
-        pluginStyles.delete(pluginId);
-      }
+      if (style) style.remove();
+      pluginStyles.delete(pluginId);
     },
 
-    // ── CSS ──
     injectCSS(pluginId, css) {
       const existing = pluginStyles.get(pluginId);
       if (existing) existing.remove();
 
       const style = document.createElement('style');
-      style.id = `bb-style-${pluginId}`;
       style.textContent = css;
       document.head.appendChild(style);
+
       pluginStyles.set(pluginId, style);
       return style;
     },
 
     removeCSS(pluginId) {
       const style = pluginStyles.get(pluginId);
-      if (style) {
-        style.remove();
-        pluginStyles.delete(pluginId);
-      }
+      if (style) style.remove();
+      pluginStyles.delete(pluginId);
     },
 
-    // ── Hooks ──
     registerHook(name, handler) {
       if (!hooks[name]) hooks[name] = [];
       hooks[name].push(handler);
@@ -197,7 +286,6 @@ export function createApi({ boardEl, bus, storage }) {
       hooks[name] = hooks[name].filter(fn => fn !== handler);
     },
 
-    // ── Notifications ──
     notify(message, type = 'info', duration = 3000) {
       const colors = {
         info: '#3498db',
@@ -205,22 +293,6 @@ export function createApi({ boardEl, bus, storage }) {
         warning: '#f39c12',
         error: '#e74c3c'
       };
-
-      if (!document.getElementById('bb-toast-anim')) {
-        const s = document.createElement('style');
-        s.id = 'bb-toast-anim';
-        s.textContent = `
-          @keyframes bb-toast-in {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-          }
-          @keyframes bb-toast-out {
-            from { opacity: 1; transform: translateY(0); }
-            to { opacity: 0; transform: translateY(10px); }
-          }
-        `;
-        document.head.appendChild(s);
-      }
 
       const toast = document.createElement('div');
       toast.textContent = message;
@@ -232,75 +304,23 @@ export function createApi({ boardEl, bus, storage }) {
         border-radius: 8px;
         color: #fff;
         z-index: 99999;
-        background: ${colors[type] || colors.info};
+        background: ${colors[type]};
       `;
+
       document.body.appendChild(toast);
-
-      if (duration > 0) {
-        setTimeout(() => toast.remove(), duration);
-      }
-
+      if (duration > 0) setTimeout(() => toast.remove(), duration);
       return toast;
     },
 
-    // ── Modal ──
-    showModal({ title, content, onClose }) {
-      const overlay = document.createElement('div');
-      overlay.style.cssText = `
-        position: fixed;
-        inset: 0;
-        background: rgba(0,0,0,0.5);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 100001;
-      `;
-
-      const modal = document.createElement('div');
-      modal.style.cssText = `
-        background: #fff;
-        border-radius: 12px;
-        padding: 24px;
-      `;
-
-      if (title) {
-        const h = document.createElement('h3');
-        h.textContent = title;
-        modal.appendChild(h);
-      }
-
-      if (typeof content === 'string') {
-        modal.innerHTML += content;
-      } else {
-        modal.appendChild(content);
-      }
-
-      overlay.appendChild(modal);
-      document.body.appendChild(overlay);
-
-      const close = () => {
-        overlay.remove();
-        onClose && onClose();
-      };
-
-      overlay.onclick = (e) => {
-        if (e.target === overlay) close();
-      };
-
-      return { close };
-    },
-
-    // ── Toolbar ──
     registerToolbarButton({ id, label, onClick }) {
       const toolbar = getOrCreateToolbar();
-      if (document.getElementById(`bb-btn-${id}`)) {
-        console.warn(`[API] Toolbar button ${id} already exists`);
-        return;
-      }
+      if (document.getElementById(`bb-btn-${id}`)) return;
+
       const btn = document.createElement('button');
       btn.id = `bb-btn-${id}`;
       btn.textContent = label;
       btn.onclick = onClick;
+
       toolbar.appendChild(btn);
     },
 
@@ -308,47 +328,6 @@ export function createApi({ boardEl, bus, storage }) {
       document.getElementById(`bb-btn-${id}`)?.remove();
     },
 
-    // ── Sidebar ──
-    registerSidebarItem({ id, label, icon, onClick }) {
-      const sidebar = getOrCreateSidebar();
-      const item = document.createElement('div');
-      item.id = `bb-sidebar-${id}`;
-      item.textContent = icon || '📌';
-      item.onclick = onClick;
-      sidebar.appendChild(item);
-      return item;
-    },
-
-    removeSidebarItem(id) {
-      document.getElementById(`bb-sidebar-${id}`)?.remove();
-    },
-
-    // ── Context Menu ──
-    registerContextMenuItem(label, callback) {
-      const menu = getOrCreateContextMenu();
-      const item = document.createElement('div');
-      item.textContent = label;
-      item.className = 'bb-cm-item';
-      item.onclick = (e) => {
-        e.stopPropagation();
-        menu.style.display = 'none';
-        callback();
-      };
-      menu.appendChild(item);
-    },
-
-    // ── Keyboard ──
-    registerShortcut(keys, callback) {
-      const parts = keys.toLowerCase().split('+');
-      const key = parts.pop();
-      const handler = (e) => {
-        if (e.key.toLowerCase() === key) callback(e);
-      };
-      document.addEventListener('keydown', handler);
-      return () => document.removeEventListener('keydown', handler);
-    },
-
-    // ── Draggable (improved with z-index + full move) ──
     makeDraggable(el, handle) {
       const dragHandle = handle || el;
       let offsetX = 0, offsetY = 0;
@@ -356,32 +335,24 @@ export function createApi({ boardEl, bus, storage }) {
 
       dragHandle.style.cursor = 'move';
 
-      function onMouseMove(e) {
+      function onMove(e) {
         if (!dragging) return;
         el.style.left = (e.clientX - offsetX) + 'px';
         el.style.top = (e.clientY - offsetY) + 'px';
       }
 
-      function onMouseUp() {
+      function onUp() {
         dragging = false;
-        document.removeEventListener('mousemove', onMouseMove);
-        document.removeEventListener('mouseup', onMouseUp);
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
         bus.emit('plugin:dragend', { el });
       }
 
       dragHandle.addEventListener('mousedown', (e) => {
+        const id = el.dataset.pluginId;
+
         if (el.dataset.docked === "true") {
-          const boardEl = document.getElementById('board');
-          const rect = el.getBoundingClientRect();
-          boardEl.appendChild(el);
-          el.dataset.docked = "false";
-          el.style.position = 'absolute';
-          el.style.left = rect.left + 'px';
-          el.style.top = rect.top + 'px';
-          el.style.width = rect.width + 'px';
-          el.style.height = rect.height + 'px';
-          el.style.flex = '';
-          bus.emit('plugin:undocked', { el });
+          undockPlugin(id);
         }
 
         dragging = true;
@@ -391,12 +362,11 @@ export function createApi({ boardEl, bus, storage }) {
 
         bus.emit('plugin:dragstart', { el });
 
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
       });
     },
 
-    // ── Resizable ──
     makeResizable(el) {
       const handle = document.createElement('div');
       handle.style.cssText = `
@@ -406,7 +376,6 @@ export function createApi({ boardEl, bus, storage }) {
         width: 14px;
         height: 14px;
         cursor: nwse-resize;
-        z-index: 10;
       `;
       el.appendChild(handle);
 
@@ -432,43 +401,6 @@ export function createApi({ boardEl, bus, storage }) {
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
       });
-    },
-
-    // ── Utils ──
-    debounce(fn, delay = 250) {
-      let timer;
-      return (...args) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => fn(...args), delay);
-      };
-    },
-
-        throttle(fn, limit = 100) {
-      let inThrottle = false;
-      return (...args) => {
-        if (!inThrottle) {
-          fn(...args);
-          inThrottle = true;
-          setTimeout(() => inThrottle = false, limit);
-        }
-      };
-    },
-
-    // ── Extensibility Hooks & Events (for other plugins) ──
-    // You can listen to these using api.bus.on() or register custom ones with registerHook()
-    //
-    // Built-in events you can listen to:
-    //   bus.on('board:ready', ...) 
-    //   bus.on('board:allPluginsLoaded', ...)
-    //   bus.on('board:resize', ...)
-    //   bus.on('plugin:loaded', ...)
-    //   bus.on('plugin:unloaded', ...)
-    //   bus.on('plugin:dragstart', ...)
-    //   bus.on('storage:change', ...)
-    //
-    // Useful hooks you can register:
-    //   api.registerHook('manager:renderInstalledRow', handler)
-    //   api.registerHook('manager:renderCommunityCard', handler)
-    //   api.registerHook('manager:addTab', handler)
+    }
   };
 }

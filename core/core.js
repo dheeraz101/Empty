@@ -93,6 +93,11 @@ async function bootstrap() {
 
       api._setCurrentPlugin(def.id);
       await plugin.setup?.(api);           // supports async setup
+      api.setPluginPermissions?.(def.id, {
+        isSystem: def.id === 'plugin-manager',
+        canModifyOthers: def.id === 'plugin-manager',
+        canMoveOthers: true
+      });
       api._setCurrentPlugin(null);
 
       pluginModules.set(def.id, plugin);
