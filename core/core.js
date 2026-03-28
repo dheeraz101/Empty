@@ -80,15 +80,16 @@ async function bootstrap() {
     return await import(url);
   }
 
-    function isTrustedPlugin(def) {
-      // trusted if coming from registry (plugin manager controlled)
-      if (def.source === 'registry') return true;
+  function isTrustedPlugin(def) {
+    // backward compatibility
+    if (!def.source) return true;
 
-      // allow manual installs but warn
-      if (def.source === 'manual') return true;
+    if (def.source === 'system') return true;
+    if (def.source === 'registry') return true;
+    if (def.source === 'manual') return true;
 
-      return false;
-    }
+    return false;
+  }
 
   async function loadSinglePlugin(def) {
     try {
