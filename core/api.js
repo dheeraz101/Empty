@@ -108,6 +108,9 @@ export function createApi({ boardEl, bus, storage }) {
         div.style.top = '20px';
         div.style.minWidth = '120px';
         div.style.minHeight = '80px';
+        div.style.overflow = 'hidden';        
+        div.style.display = 'flex';             
+        div.style.flexDirection = 'column'; 
 
         boardEl.appendChild(div);
 
@@ -340,40 +343,38 @@ export function createApi({ boardEl, bus, storage }) {
 
     // ── DRAG (EVENT BASED) ──
     makeDraggable(el, handle) {
-      const dragHandle = handle || el;
+    const dragHandle = handle || el;
 
-      let offsetX = 0;
-      let offsetY = 0;
-      let dragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+    let dragging = false;
 
-      dragHandle.style.cursor = 'move';
+    dragHandle.style.cursor = 'move';
 
-      dragHandle.addEventListener('mousedown', (e) => {
-        if (el.dataset.docked === "true") return;
+    dragHandle.addEventListener('mousedown', (e) => {
+      // If docked, undock first by moving back to board
+      if (el.dataset.docked === "true") {
+        const boardEl = document.getElementById('board');
+        const rect = el.getBoundingClientRect();
+        
+        boardEl.appendChild(el);
+        el.dataset.docked = "false";
+        el.style.position = 'absolute';
+        el.style.left = rect.left + 'px';
+        el.style.top = rect.top + 'px';
+        el.style.width = rect.width + 'px';
+        el.style.height = rect.height + 'px';
+        el.style.flex = '';
+        
+        bus.emit('plugin:undocked', { el });
+      }
 
-        dragging = true;
-        offsetX = e.clientX - el.offsetLeft;
-        offsetY = e.clientY - el.offsetTop;
+      dragging = true;
+      offsetX = e.clientX - el.offsetLeft;
+      offsetY = e.clientY - el.offsetTop;
 
-        bus.emit('plugin:dragstart', { el });
-      });
-
-      document.addEventListener('mousemove', (e) => {
-        if (!dragging) return;
-
-        el.style.left = (e.clientX - offsetX) + 'px';
-        el.style.top = (e.clientY - offsetY) + 'px';
-
-        bus.emit('plugin:dragging', { el, x: e.clientX, y: e.clientY });
-      });
-
-      document.addEventListener('mouseup', (e) => {
-        if (!dragging) return;
-
-        dragging = false;
-
-        bus.emit('plugin:dragend', { el, x: e.clientX, y: e.clientY });
-      });
+      bus.emit('plugin:dragstart', { el });
+    });
     },
 
     // ── Resize ──
@@ -386,14 +387,15 @@ export function createApi({ boardEl, bus, storage }) {
         width: 14px;
         height: 14px;
         cursor: nwse-resize;
+        z-index: 10;
       `;
 
       el.appendChild(handle);
 
       handle.addEventListener('mousedown', (e) => {
-        if (el.dataset.docked === "true") return;
-
+        // Allow resize even when docked — the zone might need it
         e.preventDefault();
+        e.stopPropagation();  // ← ADD: don't trigger drag
 
         const startX = e.clientX;
         const startY = e.clientY;
