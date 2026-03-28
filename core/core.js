@@ -17,9 +17,8 @@ async function bootstrap() {
 
   const api = createApi({ boardEl, bus, storage });
 
-  console.log('%c🚀 Blank Board core ready (micro-kernel v2)', 'color:#00d4ff;font-weight:bold');
+  console.log('%c🚀 Blank Board core ready (micro-kernel v3)', 'color:#00d4ff;font-weight:bold');
 
-  // ── Dynamic plugin registry ──
   let registry = [];
   const REGISTRY_KEY = 'board-plugins-registry';
 
@@ -28,74 +27,72 @@ async function bootstrap() {
     if (saved) {
       registry = JSON.parse(saved);
     } else {
-      try {
-        const res = await fetch('./plugins.json');
-        registry = await res.json();
-      } catch (e) {
-        registry = [];
-      }
-      registry.forEach(p => { if (typeof p.enabled === 'undefined') p.enabled = true; });
+      registry = [];
       localStorage.setItem(REGISTRY_KEY, JSON.stringify(registry));
     }
   }
 
   await initRegistry();
 
-  // Base URL for relative plugin paths
   const rootUrl = window.location.origin + window.location.pathname.substring(
-    0,
-    window.location.pathname.lastIndexOf('/') + 1
+    0, window.location.pathname.lastIndexOf('/') + 1
   );
 
-  // Store loaded plugin modules for teardown
   const pluginModules = new Map();
 
-  // Smart import that handles MIME type issues (raw GitHub URLs serve text/plain)
-    async function importPlugin(url) {
-      // If cross-origin (GitHub Raw, etc.), always use fetch+blob
-      const sameOrigin = url.startsWith(location.origin);
-      if (!sameOrigin) {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const code = await res.text();
-        const blob = new Blob([code], { type: 'application/javascript' });
-        const blobUrl = URL.createObjectURL(blob);
-        try {
-          return await import(blobUrl);
-        } finally {
-          URL.revokeObjectURL(blobUrl);
-        }
-      }
+  // Stable URL for the Plugin Manager — CHANGE THIS TO YOUR ACTUAL RAW GITHUB URL
+  const DEFAULT_MANAGER_URL = 'https://raw.githubusercontent.com/dheeraz101/Empty_Plugins/refs/heads/main/plugin-manager.js';
 
-      // Same-origin: try normal import first (for local / Netlify plugins)
-      return await import(url);
+  // ── Full-proof Plugin Manager recovery (critical for public release) ──
+  let managerEntry = registry.find(p => p.id === 'plugin-manager');
+  if (!managerEntry) {
+    console.log('%c🌱 Auto-installing Plugin Manager (first time or was deleted)', 'color:#00d4ff');
+    managerEntry = {
+      id: 'plugin-manager',
+      url: DEFAULT_MANAGER_URL,
+      name: 'Plugin Manager',
+      enabled: true
+    };
+    registry.push(managerEntry);
+    localStorage.setItem(REGISTRY_KEY, JSON.stringify(registry));
+  } else if (!managerEntry.enabled) {
+    console.log('%c🔄 Re-enabling Plugin Manager', 'color:#00d4ff');
+    managerEntry.enabled = true;
+    localStorage.setItem(REGISTRY_KEY, JSON.stringify(registry));
+  }
+
+  async function importPlugin(url) {
+    const sameOrigin = url.startsWith(location.origin);
+    if (!sameOrigin) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const code = await res.text();
+      const blob = new Blob([code], { type: 'application/javascript' });
+      const blobUrl = URL.createObjectURL(blob);
+      try { return await import(blobUrl); }
+      finally { URL.revokeObjectURL(blobUrl); }
     }
+    return await import(url);
+  }
 
   async function loadSinglePlugin(def) {
     try {
       let fullUrl = def.url;
-
-      // Only prepend rootUrl for relative paths, not absolute URLs
-      if (fullUrl.startsWith('./')) {
-        fullUrl = rootUrl + fullUrl.substring(2);
-      } else if (fullUrl.startsWith('/')) {
-        fullUrl = rootUrl + fullUrl.substring(1);
-      }
-      // http:// and https:// URLs are left as-is
+      if (fullUrl.startsWith('./')) fullUrl = rootUrl + fullUrl.substring(2);
+      else if (fullUrl.startsWith('/')) fullUrl = rootUrl + fullUrl.substring(1);
 
       console.log(`🔌 Loading plugin: ${fullUrl}`);
 
       const plugin = await importPlugin(fullUrl);
 
-      if (!plugin.meta || !plugin.setup) {
-        console.warn(`⚠️ Invalid plugin (missing meta or setup): ${def.id}`);
-        return;
+      if (!plugin.meta || !plugin.setup || typeof plugin.setup !== 'function') {
+        throw new Error(`Invalid plugin: missing meta or setup`);
       }
 
       console.log(`✅ Loaded → ${plugin.meta.name || def.id} v${plugin.meta.version}`);
 
       api._setCurrentPlugin(def.id);
-      plugin.setup(api);
+      await plugin.setup?.(api);           // supports async setup
       api._setCurrentPlugin(null);
 
       pluginModules.set(def.id, plugin);
@@ -105,44 +102,40 @@ async function bootstrap() {
         meta: plugin.meta,
         container: api.getContainer(def.id)
       });
-
     } catch (err) {
       console.error(`❌ Failed to load plugin ${def.id}:`, err);
+      api.notify(`Plugin "${def.id}" failed to load — check console`, 'error', 6000);
     }
   }
 
   function unloadSinglePlugin(id) {
     const plugin = pluginModules.get(id);
     if (plugin && typeof plugin.teardown === 'function') {
-      try {
-        plugin.teardown();
-        console.log(`🧹 Teardown complete for: ${id}`);
-      } catch (err) {
-        console.error(`❌ Teardown failed for ${id}:`, err);
-      }
+      try { plugin.teardown(); } catch (e) {}
     }
     pluginModules.delete(id);
-
-    // Clean up container and CSS
     api.removeContainer(id);
-
     bus.emit('plugin:unloaded', id);
   }
 
-  // Initial load of enabled plugins
+  // Load enabled plugins
   for (const def of registry) {
     if (def.enabled) await loadSinglePlugin(def);
   }
 
-  // ── Plugin management API ──
+  // ── Important lifecycle event for plugins ──
+  bus.emit('board:allPluginsLoaded', { 
+    total: registry.length, 
+    enabled: registry.filter(p => p.enabled).length 
+  });
+
+  // Plugin management API
   api.registry = {
     getAll: () => JSON.parse(JSON.stringify(registry)),
-
     get: (id) => {
       const entry = registry.find(p => p.id === id);
       return entry ? { ...entry } : null;
     },
-
     save: (newRegistry) => {
       registry = newRegistry;
       localStorage.setItem(REGISTRY_KEY, JSON.stringify(registry));
@@ -193,15 +186,25 @@ async function bootstrap() {
     return true;
   };
 
-  // Expose globally for debugging and plugin manager
+    // ── Public restart utility ──
+  api.restart = async () => {
+    console.log('%c♻️ Restarting Blank Board...', 'color:#00d4ff');
+    // Unload all plugins
+    for (const id of [...pluginModules.keys()]) {
+      unloadSinglePlugin(id);
+    }
+    // Reload all enabled plugins
+    for (const def of registry) {
+      if (def.enabled) await loadSinglePlugin(def);
+    }
+    bus.emit('board:restarted');
+    api.notify('Board restarted successfully', 'success');
+  };
+
   window.blankBoard = { bus, api };
 
-  // ── Built-in events ──
-
-  // board:ready
   bus.emit('board:ready', { boardEl });
 
-  // board:resize
   let resizeTimer;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
@@ -213,7 +216,6 @@ async function bootstrap() {
     }, 150);
   });
 
-  // storage:change — wrap storage.set to emit events
   const origSet = storage.set;
   storage.set = (key, value) => {
     const oldValue = storage.get(key);
@@ -221,7 +223,7 @@ async function bootstrap() {
     bus.emit('storage:change', { key, value, oldValue });
   };
 
-  console.log('%c🧩 Blank Board ready — right-click for menu, check window.blankBoard', 'color:#00d4ff;font-weight:bold');
+  console.log('%c🧩 Blank Board ready — everything is now a plugin!', 'color:#00d4ff;font-weight:bold');
 }
 
 bootstrap();

@@ -16,14 +16,22 @@ export class EventBus {
   once(event, callback) {
     const wrapper = (data) => {
       this.off(event, wrapper);
-      callback(data);
+      try { callback(data); } catch (err) {
+        console.error(`[EventBus] Error in once listener for "${event}":`, err);
+      }
     };
     this.on(event, wrapper);
   }
 
   emit(event, data) {
     if (!this.listeners[event]) return;
-    this.listeners[event].forEach(cb => cb(data));
+    this.listeners[event].forEach(cb => {
+      try {
+        cb(data);
+      } catch (err) {
+        console.error(`[EventBus] Error in listener for "${event}":`, err);
+      }
+    });
   }
 
   removeAll(event) {

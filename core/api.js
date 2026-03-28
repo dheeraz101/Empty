@@ -89,10 +89,26 @@ export function createApi({ boardEl, bus, storage }) {
   }
 
   return {
-    version: "3.2.0",
+    version: "3.3.0",
     boardEl,
     bus,
-    storage,
+
+    // ── Enhanced Storage ──
+    storage: {
+      ...storage,
+      getForPlugin: (pluginId, key) => {
+        const fullKey = `plugin:${pluginId}:${key}`;
+        return JSON.parse(localStorage.getItem(fullKey) || 'null');
+      },
+      setForPlugin: (pluginId, key, value) => {
+        const fullKey = `plugin:${pluginId}:${key}`;
+        const oldValue = JSON.parse(localStorage.getItem(fullKey) || 'null');
+        localStorage.setItem(fullKey, JSON.stringify(value));
+        bus.emit('storage:change', { key: fullKey, value, oldValue, pluginId });
+      }
+    },
+
+    getPluginId: () => currentPluginId,
 
     // ── Container ──
     get container() {
@@ -137,7 +153,6 @@ export function createApi({ boardEl, bus, storage }) {
         container.remove();
         pluginContainers.delete(pluginId);
       }
-
       const style = pluginStyles.get(pluginId);
       if (style) {
         style.remove();
@@ -278,13 +293,14 @@ export function createApi({ boardEl, bus, storage }) {
     // ── Toolbar ──
     registerToolbarButton({ id, label, onClick }) {
       const toolbar = getOrCreateToolbar();
-      if (document.getElementById(`bb-btn-${id}`)) return;
-
+      if (document.getElementById(`bb-btn-${id}`)) {
+        console.warn(`[API] Toolbar button ${id} already exists`);
+        return;
+      }
       const btn = document.createElement('button');
       btn.id = `bb-btn-${id}`;
       btn.textContent = label;
       btn.onclick = onClick;
-
       toolbar.appendChild(btn);
     },
 
@@ -295,12 +311,10 @@ export function createApi({ boardEl, bus, storage }) {
     // ── Sidebar ──
     registerSidebarItem({ id, label, icon, onClick }) {
       const sidebar = getOrCreateSidebar();
-
       const item = document.createElement('div');
       item.id = `bb-sidebar-${id}`;
       item.textContent = icon || '📌';
       item.onclick = onClick;
-
       sidebar.appendChild(item);
       return item;
     },
@@ -309,20 +323,17 @@ export function createApi({ boardEl, bus, storage }) {
       document.getElementById(`bb-sidebar-${id}`)?.remove();
     },
 
-    // ── Context Menu Items ──
+    // ── Context Menu ──
     registerContextMenuItem(label, callback) {
       const menu = getOrCreateContextMenu();
-
       const item = document.createElement('div');
       item.textContent = label;
       item.className = 'bb-cm-item';
-
       item.onclick = (e) => {
         e.stopPropagation();
         menu.style.display = 'none';
         callback();
       };
-
       menu.appendChild(item);
     },
 
@@ -330,54 +341,62 @@ export function createApi({ boardEl, bus, storage }) {
     registerShortcut(keys, callback) {
       const parts = keys.toLowerCase().split('+');
       const key = parts.pop();
-
       const handler = (e) => {
-        if (e.key.toLowerCase() === key) {
-          callback(e);
-        }
+        if (e.key.toLowerCase() === key) callback(e);
       };
-
       document.addEventListener('keydown', handler);
       return () => document.removeEventListener('keydown', handler);
     },
 
-    // ── DRAG (EVENT BASED) ──
+    // ── Draggable (improved with z-index + full move) ──
     makeDraggable(el, handle) {
-    const dragHandle = handle || el;
+      const dragHandle = handle || el;
+      let offsetX = 0, offsetY = 0;
+      let dragging = false;
 
-    let offsetX = 0;
-    let offsetY = 0;
-    let dragging = false;
+      dragHandle.style.cursor = 'move';
 
-    dragHandle.style.cursor = 'move';
-
-    dragHandle.addEventListener('mousedown', (e) => {
-      // If docked, undock first by moving back to board
-      if (el.dataset.docked === "true") {
-        const boardEl = document.getElementById('board');
-        const rect = el.getBoundingClientRect();
-        
-        boardEl.appendChild(el);
-        el.dataset.docked = "false";
-        el.style.position = 'absolute';
-        el.style.left = rect.left + 'px';
-        el.style.top = rect.top + 'px';
-        el.style.width = rect.width + 'px';
-        el.style.height = rect.height + 'px';
-        el.style.flex = '';
-        
-        bus.emit('plugin:undocked', { el });
+      function onMouseMove(e) {
+        if (!dragging) return;
+        el.style.left = (e.clientX - offsetX) + 'px';
+        el.style.top = (e.clientY - offsetY) + 'px';
       }
 
-      dragging = true;
-      offsetX = e.clientX - el.offsetLeft;
-      offsetY = e.clientY - el.offsetTop;
+      function onMouseUp() {
+        dragging = false;
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        bus.emit('plugin:dragend', { el });
+      }
 
-      bus.emit('plugin:dragstart', { el });
-    });
+      dragHandle.addEventListener('mousedown', (e) => {
+        if (el.dataset.docked === "true") {
+          const boardEl = document.getElementById('board');
+          const rect = el.getBoundingClientRect();
+          boardEl.appendChild(el);
+          el.dataset.docked = "false";
+          el.style.position = 'absolute';
+          el.style.left = rect.left + 'px';
+          el.style.top = rect.top + 'px';
+          el.style.width = rect.width + 'px';
+          el.style.height = rect.height + 'px';
+          el.style.flex = '';
+          bus.emit('plugin:undocked', { el });
+        }
+
+        dragging = true;
+        offsetX = e.clientX - el.offsetLeft;
+        offsetY = e.clientY - el.offsetTop;
+        el.style.zIndex = Date.now();
+
+        bus.emit('plugin:dragstart', { el });
+
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+      });
     },
 
-    // ── Resize ──
+    // ── Resizable ──
     makeResizable(el) {
       const handle = document.createElement('div');
       handle.style.cssText = `
@@ -389,13 +408,11 @@ export function createApi({ boardEl, bus, storage }) {
         cursor: nwse-resize;
         z-index: 10;
       `;
-
       el.appendChild(handle);
 
       handle.addEventListener('mousedown', (e) => {
-        // Allow resize even when docked — the zone might need it
         e.preventDefault();
-        e.stopPropagation();  // ← ADD: don't trigger drag
+        e.stopPropagation();
 
         const startX = e.clientX;
         const startY = e.clientY;
@@ -426,7 +443,7 @@ export function createApi({ boardEl, bus, storage }) {
       };
     },
 
-    throttle(fn, limit = 100) {
+        throttle(fn, limit = 100) {
       let inThrottle = false;
       return (...args) => {
         if (!inThrottle) {
@@ -435,6 +452,23 @@ export function createApi({ boardEl, bus, storage }) {
           setTimeout(() => inThrottle = false, limit);
         }
       };
-    }
+    },
+
+    // ── Extensibility Hooks & Events (for other plugins) ──
+    // You can listen to these using api.bus.on() or register custom ones with registerHook()
+    //
+    // Built-in events you can listen to:
+    //   bus.on('board:ready', ...) 
+    //   bus.on('board:allPluginsLoaded', ...)
+    //   bus.on('board:resize', ...)
+    //   bus.on('plugin:loaded', ...)
+    //   bus.on('plugin:unloaded', ...)
+    //   bus.on('plugin:dragstart', ...)
+    //   bus.on('storage:change', ...)
+    //
+    // Useful hooks you can register:
+    //   api.registerHook('manager:renderInstalledRow', handler)
+    //   api.registerHook('manager:renderCommunityCard', handler)
+    //   api.registerHook('manager:addTab', handler)
   };
 }
