@@ -25,7 +25,12 @@ async function bootstrap() {
   async function initRegistry() {
     const saved = localStorage.getItem(REGISTRY_KEY);
     if (saved) {
-      registry = JSON.parse(saved);
+      try {
+        registry = JSON.parse(saved);
+      } catch {
+        console.warn('⚠️ Registry corrupted, resetting...');
+        registry = [];
+      }
     } else {
       registry = [];
       localStorage.setItem(REGISTRY_KEY, JSON.stringify(registry));
@@ -75,6 +80,16 @@ async function bootstrap() {
     return await import(url);
   }
 
+    function isTrustedPlugin(def) {
+      // trusted if coming from registry (plugin manager controlled)
+      if (def.source === 'registry') return true;
+
+      // allow manual installs but warn
+      if (def.source === 'manual') return true;
+
+      return false;
+    }
+
   async function loadSinglePlugin(def) {
     try {
       let fullUrl = def.url;
@@ -82,6 +97,15 @@ async function bootstrap() {
       else if (fullUrl.startsWith('/')) fullUrl = rootUrl + fullUrl.substring(1);
 
       console.log(`🔌 Loading plugin: ${fullUrl}`);
+
+      if (!isTrustedPlugin(def)) {
+        console.warn(`Blocked plugin: ${def.id}`);
+        return;
+      }
+
+      if (def.source === 'manual') {
+        api.notify(`⚠️ Installing external plugin: ${def.id}`, 'warning', 4000);
+      }
 
       const plugin = await importPlugin(fullUrl);
 
@@ -92,12 +116,20 @@ async function bootstrap() {
       console.log(`✅ Loaded → ${plugin.meta.name || def.id} v${plugin.meta.version}`);
 
       api._setCurrentPlugin(def.id);
-      await plugin.setup?.(api);           // supports async setup
+
       api.setPluginPermissions?.(def.id, {
         isSystem: def.id === 'plugin-manager',
         canModifyOthers: def.id === 'plugin-manager',
         canMoveOthers: true
       });
+
+      await Promise.race([
+        plugin.setup?.(api),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Plugin timeout')), 5000)
+        )
+      ]);
+
       api._setCurrentPlugin(null);
 
       pluginModules.set(def.id, plugin);
@@ -122,6 +154,16 @@ async function bootstrap() {
     api.removeContainer(id);
     bus.emit('plugin:unloaded', id);
   }
+
+  const seen = new Set();
+    registry = registry.filter(p => {
+      if (seen.has(p.id)) {
+        console.warn(`Duplicate plugin removed: ${p.id}`);
+        return false;
+      }
+      seen.add(p.id);
+      return true;
+    });
 
   // Load enabled plugins
   for (const def of registry) {
@@ -172,13 +214,26 @@ async function bootstrap() {
   };
 
   api.installPlugin = async (id, url, name = id) => {
+    if (!url.endsWith('.js')) {
+      api.notify('Invalid plugin URL (must be .js)', 'error');
+      return false;
+    }
+
+    if (!/^https?:\/\//.test(url)) {
+      api.notify('Invalid URL format', 'error');
+      return false;
+    }
+
     if (registry.find(p => p.id === id)) {
       console.warn('Plugin ID already exists');
       return false;
     }
-    const newDef = { id, url, name, enabled: true };
+
+    const newDef = { id, url, name, enabled: true, source: 'manual' };
+
     registry.push(newDef);
     api.registry.save(registry);
+
     await loadSinglePlugin(newDef);
     return true;
   };

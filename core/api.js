@@ -4,10 +4,14 @@ export function createApi({ boardEl, bus, storage }) {
   const hooks = {};
   const pluginContainers = new Map();
   const pluginStyles = new Map();
-  const pluginState = new Map(); // 🔥 NEW: centralized state
+  const pluginState = new Map();
   const pluginPermissions = new Map();
 
   let currentPluginId = null;
+
+  // ─────────────────────────────────────────────
+  // 🔐 PERMISSIONS SYSTEM
+  // ─────────────────────────────────────────────
 
   function setPluginPermissions(pluginId, permissions = {}) {
     pluginPermissions.set(pluginId, {
@@ -24,7 +28,7 @@ export function createApi({ boardEl, bus, storage }) {
   }
 
   // ─────────────────────────────────────────────
-  // UI SYSTEMS (UNCHANGED)
+  // UI SYSTEMS
   // ─────────────────────────────────────────────
 
   function getOrCreateToolbar() {
@@ -107,7 +111,7 @@ export function createApi({ boardEl, bus, storage }) {
   }
 
   // ─────────────────────────────────────────────
-  // 🔥 CORE CONTROL SYSTEM (NEW)
+  // 🔥 CORE CONTROL SYSTEM
   // ─────────────────────────────────────────────
 
   function mountPlugin(pluginId, targetEl) {
@@ -117,7 +121,6 @@ export function createApi({ boardEl, bus, storage }) {
     pluginState.set(pluginId, { mode: 'docked', parent: targetEl });
 
     targetEl.appendChild(el);
-
     el.dataset.docked = 'true';
 
     el.style.position = 'relative';
@@ -126,7 +129,6 @@ export function createApi({ boardEl, bus, storage }) {
     el.style.width = '100%';
     el.style.height = '100%';
     el.style.transform = 'none';
-    el.style.inset = '0';
 
     bus.emit('plugin:docked', { pluginId, el, target: targetEl });
   }
@@ -138,7 +140,6 @@ export function createApi({ boardEl, bus, storage }) {
     const rect = el.getBoundingClientRect();
 
     boardEl.appendChild(el);
-
     el.dataset.docked = 'false';
 
     el.style.position = 'absolute';
@@ -184,12 +185,16 @@ export function createApi({ boardEl, bus, storage }) {
     boardEl,
     bus,
 
-    // 🔥 NEW CORE METHODS
+    // 🔐 Permissions
+    setPluginPermissions,
+
+    // 🔥 Core control
     mountPlugin,
     undockPlugin,
     updatePlugin,
     getPlugin,
 
+    // ── Storage ──
     storage: {
       ...storage,
       getForPlugin: (pluginId, key) => {
@@ -206,6 +211,7 @@ export function createApi({ boardEl, bus, storage }) {
 
     getPluginId: () => currentPluginId,
 
+    // ── Container ──
     get container() {
       if (!currentPluginId) return boardEl;
 
@@ -213,12 +219,13 @@ export function createApi({ boardEl, bus, storage }) {
         const div = document.createElement('div');
         div.className = 'bb-plugin-container bb-plugin-box';
         div.dataset.pluginId = currentPluginId;
-
+        div.setAttribute('data-plugin-id', currentPluginId);
         div.style.position = 'absolute';
         div.style.left = '20px';
         div.style.top = '20px';
         div.style.minWidth = '120px';
         div.style.minHeight = '80px';
+        div.style.overflow = 'hidden';
         div.style.display = 'flex';
         div.style.flexDirection = 'column';
 
@@ -253,14 +260,34 @@ export function createApi({ boardEl, bus, storage }) {
       pluginStyles.delete(pluginId);
     },
 
-    injectCSS(pluginId, css) {
+    // ── CSS ──
+    injectCSS(pluginId, css, { global = false } = {}) {
       const existing = pluginStyles.get(pluginId);
       if (existing) existing.remove();
 
       const style = document.createElement('style');
-      style.textContent = css;
-      document.head.appendChild(style);
+      style.id = `bb-style-${pluginId}`;
 
+      if (global) {
+        // 🔓 FULL CONTROL MODE
+        style.textContent = css;
+      } else {
+        // 🔒 SAFE SCOPED MODE (default)
+        style.textContent = `
+          [data-plugin-id="${pluginId}"] {
+            font-family: system-ui, sans-serif;
+            box-sizing: border-box;
+          }
+
+          [data-plugin-id="${pluginId}"] * {
+            box-sizing: inherit;
+          }
+
+          ${css}
+        `;
+      }
+
+      document.head.appendChild(style);
       pluginStyles.set(pluginId, style);
       return style;
     },
@@ -271,6 +298,7 @@ export function createApi({ boardEl, bus, storage }) {
       pluginStyles.delete(pluginId);
     },
 
+    // ── Hooks ──
     registerHook(name, handler) {
       if (!hooks[name]) hooks[name] = [];
       hooks[name].push(handler);
@@ -286,6 +314,7 @@ export function createApi({ boardEl, bus, storage }) {
       hooks[name] = hooks[name].filter(fn => fn !== handler);
     },
 
+    // ── Notifications ──
     notify(message, type = 'info', duration = 3000) {
       const colors = {
         info: '#3498db',
@@ -312,6 +341,51 @@ export function createApi({ boardEl, bus, storage }) {
       return toast;
     },
 
+    // ── Modal ──
+    showModal({ title, content, onClose }) {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = `
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100001;
+      `;
+
+      const modal = document.createElement('div');
+      modal.style.cssText = `
+        background: #fff;
+        border-radius: 12px;
+        padding: 24px;
+      `;
+
+      if (title) {
+        const h = document.createElement('h3');
+        h.textContent = title;
+        modal.appendChild(h);
+      }
+
+      if (typeof content === 'string') modal.innerHTML += content;
+      else modal.appendChild(content);
+
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+
+      const close = () => {
+        overlay.remove();
+        onClose && onClose();
+      };
+
+      overlay.onclick = (e) => {
+        if (e.target === overlay) close();
+      };
+
+      return { close };
+    },
+
+    // ── Toolbar ──
     registerToolbarButton({ id, label, onClick }) {
       const toolbar = getOrCreateToolbar();
       if (document.getElementById(`bb-btn-${id}`)) return;
@@ -328,6 +402,49 @@ export function createApi({ boardEl, bus, storage }) {
       document.getElementById(`bb-btn-${id}`)?.remove();
     },
 
+    // ── Sidebar ──
+    registerSidebarItem({ id, icon, onClick }) {
+      const sidebar = getOrCreateSidebar();
+      const item = document.createElement('div');
+      item.id = `bb-sidebar-${id}`;
+      item.textContent = icon || '📌';
+      item.onclick = onClick;
+      sidebar.appendChild(item);
+      return item;
+    },
+
+    removeSidebarItem(id) {
+      document.getElementById(`bb-sidebar-${id}`)?.remove();
+    },
+
+    // ── Context Menu ──
+    registerContextMenuItem(label, callback) {
+      const menu = getOrCreateContextMenu();
+      const item = document.createElement('div');
+      item.textContent = label;
+      item.className = 'bb-cm-item';
+      item.onclick = (e) => {
+        e.stopPropagation();
+        menu.style.display = 'none';
+        callback();
+      };
+      menu.appendChild(item);
+    },
+
+    // ── Keyboard ──
+    registerShortcut(keys, callback) {
+      const parts = keys.toLowerCase().split('+');
+      const key = parts.pop();
+
+      const handler = (e) => {
+        if (e.key.toLowerCase() === key) callback(e);
+      };
+
+      document.addEventListener('keydown', handler);
+      return () => document.removeEventListener('keydown', handler);
+    },
+
+    // ── Drag ──
     makeDraggable(el, handle) {
       const dragHandle = handle || el;
       let offsetX = 0, offsetY = 0;
@@ -350,8 +467,7 @@ export function createApi({ boardEl, bus, storage }) {
 
       dragHandle.addEventListener('mousedown', (e) => {
         const id = el.dataset.pluginId;
-
-        if (el.dataset.docked === "true") {
+        if (el.dataset.docked === "true" && id) {
           undockPlugin(id);
         }
 
@@ -367,6 +483,7 @@ export function createApi({ boardEl, bus, storage }) {
       });
     },
 
+    // ── Resize ──
     makeResizable(el) {
       const handle = document.createElement('div');
       handle.style.cssText = `
@@ -401,6 +518,26 @@ export function createApi({ boardEl, bus, storage }) {
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
       });
+    },
+
+    // ── Utils ──
+    debounce(fn, delay = 250) {
+      let timer;
+      return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), delay);
+      };
+    },
+
+    throttle(fn, limit = 100) {
+      let inThrottle = false;
+      return (...args) => {
+        if (!inThrottle) {
+          fn(...args);
+          inThrottle = true;
+          setTimeout(() => inThrottle = false, limit);
+        }
+      };
     }
   };
 }
