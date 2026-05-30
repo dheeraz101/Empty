@@ -1,543 +1,573 @@
-// core/api.js
+// Blank Board Core API v4.0.0
+// Same-page plugins are not a perfect security sandbox. This file protects the core
+// from accidental breakage and enforces a clear plugin contract.
+
+export const CORE_VERSION = '4.0.0';
+
+const DEFAULT_PERMISSIONS = Object.freeze({
+  storage: true,
+  ui: true,
+  bus: true,
+  hooks: true,
+  layout: true,
+  clipboard: false,
+  network: false,
+  globalCSS: false,
+  theme: false,
+  system: false,
+  modifyOthers: false,
+  moveOthers: false,
+  rawBoard: false
+});
+
+const SYSTEM_PERMISSIONS = Object.freeze({
+  storage: true,
+  ui: true,
+  bus: true,
+  hooks: true,
+  layout: true,
+  clipboard: true,
+  network: true,
+  globalCSS: true,
+  theme: true,
+  system: true,
+  modifyOthers: true,
+  moveOthers: true,
+  rawBoard: true
+});
 
 export function createApi({ boardEl, bus, storage }) {
-  const hooks = {};
+  const hooks = new Map();
   const pluginContainers = new Map();
   const pluginStyles = new Map();
   const pluginState = new Map();
   const pluginPermissions = new Map();
+  const pluginCleanups = new Map();
+  const pluginTimers = new Map();
+  const pluginUi = new Map();
+  const pluginErrors = new Map();
 
   let currentPluginId = null;
 
-  // ─────────────────────────────────────────────
-  // 🔐 PERMISSIONS SYSTEM
-  // ─────────────────────────────────────────────
+  function normalizePluginId(id) {
+    return String(id || '').trim().toLowerCase().replace(/[^a-z0-9._-]/g, '-').slice(0, 80);
+  }
+
+  function safeJsonParse(raw, fallback = null) {
+    try { return raw == null ? fallback : JSON.parse(raw); }
+    catch { return fallback; }
+  }
+
+  function emitCoreError(payload) {
+    bus.emit('core:error', payload);
+  }
 
   function setPluginPermissions(pluginId, permissions = {}) {
-    pluginPermissions.set(pluginId, {
-      canMoveOthers: false,
-      canModifyOthers: false,
-      isSystem: false,
-      ...permissions
-    });
+    const id = normalizePluginId(pluginId);
+    const normalized = { ...DEFAULT_PERMISSIONS, ...permissions };
+    if (permissions.system || permissions.isSystem) Object.assign(normalized, SYSTEM_PERMISSIONS);
+    normalized.canModifyOthers = !!(normalized.modifyOthers || permissions.canModifyOthers);
+    normalized.canMoveOthers = !!(normalized.moveOthers || permissions.canMoveOthers);
+    normalized.isSystem = !!normalized.system;
+    pluginPermissions.set(id, normalized);
+  }
+
+  function getPermissions(pluginId) {
+    const id = normalizePluginId(pluginId);
+    return pluginPermissions.get(id) || { ...DEFAULT_PERMISSIONS };
   }
 
   function hasPermission(pluginId, key) {
-    const perms = pluginPermissions.get(pluginId);
-    return perms?.[key] === true;
+    const p = getPermissions(pluginId);
+    return p[key] === true || p[`can${key[0]?.toUpperCase?.() || ''}${key.slice?.(1) || ''}`] === true;
   }
 
-  // ─────────────────────────────────────────────
-  // UI SYSTEMS
-  // ─────────────────────────────────────────────
-
-  function getOrCreateToolbar() {
-    let toolbar = document.getElementById('bb-toolbar');
-    if (!toolbar) {
-      toolbar = document.createElement('div');
-      toolbar.id = 'bb-toolbar';
-      toolbar.style.cssText = `
-        position: fixed;
-        top: 10px;
-        left: 50%;
-        transform: translateX(-50%);
-        display: flex;
-        gap: 6px;
-        z-index: 9999;
-        padding: 6px 10px;
-        background: #fff;
-        border-radius: 8px;
-        box-shadow: 0 2px 12px rgba(0,0,0,0.15);
-      `;
-      document.body.appendChild(toolbar);
+  function assertPermission(pluginId, key, action = key) {
+    if (!hasPermission(pluginId, key)) {
+      throw new Error(`Plugin "${pluginId}" does not have permission for ${action}.`);
     }
-    return toolbar;
+  }
+
+  function trackCleanup(pluginId, fn) {
+    const id = normalizePluginId(pluginId);
+    if (typeof fn !== 'function') return () => {};
+    if (!pluginCleanups.has(id)) pluginCleanups.set(id, new Set());
+    pluginCleanups.get(id).add(fn);
+    return () => pluginCleanups.get(id)?.delete(fn);
+  }
+
+  function runPluginCleanups(pluginId) {
+    const id = normalizePluginId(pluginId);
+    const cleanups = pluginCleanups.get(id);
+    if (cleanups) {
+      for (const fn of [...cleanups].reverse()) {
+        try { fn(); } catch (err) { console.error(`[API] Cleanup failed for ${id}:`, err); }
+      }
+    }
+    pluginCleanups.delete(id);
+
+    const timers = pluginTimers.get(id);
+    if (timers) {
+      for (const timer of timers) {
+        if (timer.type === 'timeout') clearTimeout(timer.id);
+        if (timer.type === 'interval') clearInterval(timer.id);
+      }
+    }
+    pluginTimers.delete(id);
+
+    const uiItems = pluginUi.get(id);
+    if (uiItems) uiItems.forEach(el => el?.remove?.());
+    pluginUi.delete(id);
+
+    bus.removeOwner?.(id);
+  }
+
+  function createContainer(pluginId) {
+    const id = normalizePluginId(pluginId);
+    if (pluginContainers.has(id)) return pluginContainers.get(id);
+
+    const div = document.createElement('section');
+    div.className = 'bb-plugin-container bb-plugin-box';
+    div.dataset.pluginId = id;
+    div.setAttribute('data-plugin-id', id);
+    div.setAttribute('role', 'group');
+    div.setAttribute('aria-label', `Plugin ${id}`);
+    div.style.left = '20px';
+    div.style.top = '20px';
+    div.style.width = '260px';
+    div.style.minWidth = '120px';
+    div.style.minHeight = '80px';
+    boardEl.appendChild(div);
+
+    makeDraggable(div, id);
+    makeResizable(div, id);
+
+    pluginContainers.set(id, div);
+    pluginState.set(id, { status: 'created', mode: 'floating', crashes: 0 });
+    return div;
+  }
+
+  function getContainer(pluginId) {
+    return pluginContainers.get(normalizePluginId(pluginId)) || null;
+  }
+
+  function removeContainer(pluginId) {
+    const id = normalizePluginId(pluginId);
+    runPluginCleanups(id);
+    const el = pluginContainers.get(id);
+    if (el) el.remove();
+    pluginContainers.delete(id);
+    pluginState.delete(id);
+    removeCSS(id);
+  }
+
+  function makeDraggable(el, ownerId = currentPluginId) {
+    if (!el || el.dataset.bbDraggable === 'true') return;
+    el.dataset.bbDraggable = 'true';
+    let startX = 0, startY = 0, startLeft = 0, startTop = 0, dragging = false;
+
+    const down = (e) => {
+      if (e.button !== 0) return;
+      if (e.target.closest?.('input, textarea, select, button, a, [contenteditable="true"], .bb-resize-handle')) return;
+      dragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startLeft = parseFloat(el.style.left || 0);
+      startTop = parseFloat(el.style.top || 0);
+      el.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    };
+    const move = (e) => {
+      if (!dragging) return;
+      el.style.left = `${Math.max(0, startLeft + e.clientX - startX)}px`;
+      el.style.top = `${Math.max(0, startTop + e.clientY - startY)}px`;
+    };
+    const up = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      el.releasePointerCapture?.(e.pointerId);
+      bus.emit('plugin:moved', { pluginId: el.dataset.pluginId || ownerId, x: el.style.left, y: el.style.top });
+    };
+
+    el.addEventListener('pointerdown', down);
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+    trackCleanup(ownerId || 'core', () => {
+      el.removeEventListener('pointerdown', down);
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+    });
+  }
+
+  function makeResizable(el, ownerId = currentPluginId) {
+    if (!el || el.dataset.bbResizable === 'true') return;
+    el.dataset.bbResizable = 'true';
+    const handle = document.createElement('div');
+    handle.className = 'bb-resize-handle';
+    el.appendChild(handle);
+
+    let startX = 0, startY = 0, startW = 0, startH = 0, resizing = false;
+    const down = (e) => {
+      resizing = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startW = el.offsetWidth;
+      startH = el.offsetHeight;
+      handle.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const move = (e) => {
+      if (!resizing) return;
+      el.style.width = `${Math.max(120, startW + e.clientX - startX)}px`;
+      el.style.height = `${Math.max(80, startH + e.clientY - startY)}px`;
+    };
+    const up = (e) => {
+      if (!resizing) return;
+      resizing = false;
+      handle.releasePointerCapture?.(e.pointerId);
+      bus.emit('plugin:resized', { pluginId: el.dataset.pluginId || ownerId, width: el.style.width, height: el.style.height });
+    };
+
+    handle.addEventListener('pointerdown', down);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    trackCleanup(ownerId || 'core', () => {
+      handle.removeEventListener('pointerdown', down);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      handle.remove();
+    });
+  }
+
+  function injectCSS(pluginId, css, options = {}) {
+    const id = normalizePluginId(pluginId);
+    if (typeof css !== 'string') throw new TypeError('CSS must be a string.');
+    const { global = false } = options;
+    if (global) assertPermission(id, 'globalCSS', 'global CSS');
+
+    removeCSS(id);
+    const style = document.createElement('style');
+    style.id = `bb-style-${CSS.escape(id)}`;
+    style.dataset.owner = id;
+    style.textContent = global ? css : `
+      [data-plugin-id="${CSS.escape(id)}"] { font-family: var(--bb-font, system-ui, sans-serif); box-sizing: border-box; }
+      [data-plugin-id="${CSS.escape(id)}"] *, [data-plugin-id="${CSS.escape(id)}"] *::before, [data-plugin-id="${CSS.escape(id)}"] *::after { box-sizing: inherit; }
+      ${css}
+    `;
+    document.head.appendChild(style);
+    pluginStyles.set(id, style);
+    trackCleanup(id, () => removeCSS(id));
+    return style;
+  }
+
+  function removeCSS(pluginId) {
+    const id = normalizePluginId(pluginId);
+    const style = pluginStyles.get(id);
+    if (style) style.remove();
+    pluginStyles.delete(id);
+  }
+
+  function notify(message, type = 'info', duration = 3000) {
+    const colors = { info: '#2563eb', success: '#16a34a', warning: '#d97706', error: '#dc2626' };
+    const toast = document.createElement('div');
+    toast.className = 'bb-toast';
+    toast.textContent = String(message ?? '');
+    toast.style.cssText = `position:fixed;right:20px;bottom:20px;z-index:2147483000;padding:12px 16px;border-radius:10px;color:#fff;background:${colors[type] || colors.info};box-shadow:0 10px 30px rgba(0,0,0,.18);font:14px system-ui,sans-serif;max-width:min(420px,calc(100vw - 40px));`;
+    document.body.appendChild(toast);
+    if (duration > 0) setTimeout(() => toast.remove(), duration);
+    return toast;
+  }
+
+  function showModal({ title = 'Blank Board', content = '', onClose } = {}) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483001;padding:18px;`;
+    const modal = document.createElement('div');
+    modal.style.cssText = `background:#fff;color:#111827;border-radius:16px;width:min(560px,100%);max-height:min(720px,90vh);overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.25);padding:20px;font:14px system-ui,sans-serif;`;
+    const h = document.createElement('h2');
+    h.textContent = title;
+    h.style.cssText = 'margin:0 0 12px;font-size:20px;';
+    const body = document.createElement('div');
+    if (typeof content === 'string') body.innerHTML = content;
+    else if (content instanceof Node) body.appendChild(content);
+    const close = document.createElement('button');
+    close.textContent = 'Close';
+    close.style.cssText = 'margin-top:16px;padding:8px 14px;border:0;border-radius:999px;background:#111827;color:#fff;cursor:pointer;';
+    close.onclick = () => { overlay.remove(); onClose?.(); };
+    modal.append(h, body, close);
+    overlay.appendChild(modal);
+    overlay.addEventListener('click', e => { if (e.target === overlay) close.click(); });
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  function addContextMenuItem(label, handler, owner = currentPluginId) {
+    const id = normalizePluginId(owner || 'core');
+    const menu = getOrCreateContextMenu();
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'bb-cm-item';
+    item.textContent = label;
+    item.style.cssText = 'display:block;width:100%;padding:9px 12px;border:0;background:transparent;text-align:left;cursor:pointer;font:14px system-ui,sans-serif;color:inherit;';
+    item.onclick = (e) => { e.stopPropagation(); menu.style.display = 'none'; handler?.(e); };
+    menu.appendChild(item);
+    if (!pluginUi.has(id)) pluginUi.set(id, new Set());
+    pluginUi.get(id).add(item);
+    return item;
   }
 
   function getOrCreateContextMenu() {
     let menu = document.getElementById('bb-context-menu');
-    if (!menu) {
-      menu = document.createElement('div');
-      menu.id = 'bb-context-menu';
-      menu.style.cssText = `
-        position: fixed;
-        display: none;
-        flex-direction: column;
-        min-width: 180px;
-        background: #fff;
-        border-radius: 8px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-        z-index: 100000;
-        padding: 4px 0;
-        font-size: 14px;
-        font-family: system-ui, sans-serif;
-      `;
-      document.body.appendChild(menu);
-
-      document.addEventListener('click', () => {
-        menu.style.display = 'none';
-        menu.querySelectorAll('.bb-cm-item').forEach(el => el.remove());
-      });
-
-      boardEl.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        menu.querySelectorAll('.bb-cm-item').forEach(el => el.remove());
-        menu.style.display = 'flex';
-        menu.style.left = e.clientX + 'px';
-        menu.style.top = e.clientY + 'px';
-        bus.emit('contextmenu:open', { x: e.clientX, y: e.clientY, menu });
-      });
-    }
+    if (menu) return menu;
+    menu = document.createElement('div');
+    menu.id = 'bb-context-menu';
+    menu.style.cssText = 'position:fixed;display:none;flex-direction:column;min-width:180px;background:#fff;color:#111;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.2);z-index:2147482999;padding:6px;font:14px system-ui,sans-serif;';
+    document.body.appendChild(menu);
+    document.addEventListener('click', () => { menu.style.display = 'none'; menu.querySelectorAll('.bb-cm-item').forEach(el => el.remove()); });
+    boardEl.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      menu.querySelectorAll('.bb-cm-item').forEach(el => el.remove());
+      menu.style.display = 'flex';
+      menu.style.left = `${e.clientX}px`;
+      menu.style.top = `${e.clientY}px`;
+      bus.emit('contextmenu:open', { x: e.clientX, y: e.clientY, menu });
+    });
     return menu;
+  }
+
+  function getOrCreateToolbar() {
+    let toolbar = document.getElementById('bb-toolbar');
+    if (toolbar) return toolbar;
+    toolbar = document.createElement('div');
+    toolbar.id = 'bb-toolbar';
+    toolbar.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);display:flex;gap:6px;z-index:9999;padding:6px 10px;background:#fff;color:#111;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.15);';
+    document.body.appendChild(toolbar);
+    return toolbar;
   }
 
   function getOrCreateSidebar() {
     let sidebar = document.getElementById('bb-sidebar');
-    if (!sidebar) {
-      sidebar = document.createElement('div');
-      sidebar.id = 'bb-sidebar';
-      sidebar.style.cssText = `
-        position: fixed;
-        top: 60px;
-        left: 10px;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        z-index: 9998;
-      `;
-      document.body.appendChild(sidebar);
-    }
+    if (sidebar) return sidebar;
+    sidebar = document.createElement('div');
+    sidebar.id = 'bb-sidebar';
+    sidebar.style.cssText = 'position:fixed;top:60px;left:10px;display:flex;flex-direction:column;gap:4px;z-index:9998;';
+    document.body.appendChild(sidebar);
     return sidebar;
   }
 
-  // ─────────────────────────────────────────────
-  // 🔥 CORE CONTROL SYSTEM
-  // ─────────────────────────────────────────────
-
   function mountPlugin(pluginId, targetEl) {
-    const el = pluginContainers.get(pluginId);
-    if (!el || !targetEl) return;
-
-    pluginState.set(pluginId, { mode: 'docked', parent: targetEl });
-
+    const id = normalizePluginId(pluginId);
+    const caller = currentPluginId;
+    if (caller && caller !== id && !hasPermission(caller, 'moveOthers')) throw new Error(`Plugin "${caller}" cannot move "${id}".`);
+    const el = pluginContainers.get(id);
+    if (!el || !targetEl) return false;
     targetEl.appendChild(el);
     el.dataset.docked = 'true';
-
-    el.style.position = 'relative';
-    el.style.left = '0';
-    el.style.top = '0';
-    el.style.width = '100%';
-    el.style.height = '100%';
-    el.style.transform = 'none';
-
-    bus.emit('plugin:docked', { pluginId, el, target: targetEl });
+    Object.assign(el.style, { position: 'relative', left: '0', top: '0', width: '100%', height: '100%', transform: 'none' });
+    pluginState.set(id, { ...(pluginState.get(id) || {}), mode: 'docked', parent: targetEl });
+    bus.emit('plugin:docked', { pluginId: id, el, target: targetEl });
+    return true;
   }
 
   function undockPlugin(pluginId) {
-    const el = pluginContainers.get(pluginId);
-    if (!el) return;
-
+    const id = normalizePluginId(pluginId);
+    const caller = currentPluginId;
+    if (caller && caller !== id && !hasPermission(caller, 'moveOthers')) throw new Error(`Plugin "${caller}" cannot move "${id}".`);
+    const el = pluginContainers.get(id);
+    if (!el) return false;
     const rect = el.getBoundingClientRect();
-
     boardEl.appendChild(el);
     el.dataset.docked = 'false';
-
-    el.style.position = 'absolute';
-    el.style.left = rect.left + 'px';
-    el.style.top = rect.top + 'px';
-    el.style.width = rect.width + 'px';
-    el.style.height = rect.height + 'px';
-
-    pluginState.set(pluginId, { mode: 'floating' });
-
-    bus.emit('plugin:undocked', { pluginId, el });
+    Object.assign(el.style, { position: 'absolute', left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px` });
+    pluginState.set(id, { ...(pluginState.get(id) || {}), mode: 'floating' });
+    bus.emit('plugin:undocked', { pluginId: id, el });
+    return true;
   }
 
   function updatePlugin(targetPluginId, updater) {
+    const target = normalizePluginId(targetPluginId);
     const caller = currentPluginId;
-
-    if (caller !== targetPluginId && !hasPermission(caller, 'canModifyOthers')) {
-      console.warn(`[API] ${caller} cannot modify ${targetPluginId}`);
-      return;
-    }
-
-    const el = pluginContainers.get(targetPluginId);
-    if (!el) return;
-
-    try {
-      updater(el);
-      bus.emit('plugin:updated', { pluginId: targetPluginId, el });
-    } catch (err) {
-      console.error('Plugin update failed:', err);
-    }
+    if (caller !== target && !hasPermission(caller, 'modifyOthers')) throw new Error(`Plugin "${caller}" cannot modify "${target}".`);
+    const el = pluginContainers.get(target);
+    if (!el) return false;
+    updater(el);
+    bus.emit('plugin:updated', { pluginId: target, el });
+    return true;
   }
 
-  function getPlugin(pluginId) {
-    return pluginContainers.get(pluginId) || null;
+  function createNamespacedStorage(pluginId) {
+    const id = normalizePluginId(pluginId);
+    const prefix = `plugin:${id}:`;
+    return Object.freeze({
+      get(key, fallback = null) { return safeJsonParse(localStorage.getItem(prefix + String(key)), fallback); },
+      set(key, value) {
+        const fullKey = prefix + String(key);
+        const oldValue = safeJsonParse(localStorage.getItem(fullKey), null);
+        localStorage.setItem(fullKey, JSON.stringify(value));
+        bus.emit('storage:change', { pluginId: id, key: fullKey, value, oldValue });
+        return true;
+      },
+      remove(key) { localStorage.removeItem(prefix + String(key)); return true; },
+      list() { return Object.keys(localStorage).filter(k => k.startsWith(prefix)).map(k => k.slice(prefix.length)); },
+      clearPluginData() { Object.keys(localStorage).filter(k => k.startsWith(prefix)).forEach(k => localStorage.removeItem(k)); return true; }
+    });
   }
 
-  // ─────────────────────────────────────────────
-  // API RETURN
-  // ─────────────────────────────────────────────
-
-  return {
-    version: "4.0.0",
+  const coreApi = {
+    version: CORE_VERSION,
     boardEl,
     bus,
-
-    // 🔐 Permissions
+    storage,
     setPluginPermissions,
-
-    // 🔥 Core control
+    getPermissions,
+    hasPermission,
     mountPlugin,
     undockPlugin,
     updatePlugin,
-    getPlugin,
-
-    // ── Storage ──
-    storage: {
-      ...storage,
-      getForPlugin: (pluginId, key) => {
-        const fullKey = `plugin:${pluginId}:${key}`;
-        return JSON.parse(localStorage.getItem(fullKey) || 'null');
-      },
-      setForPlugin: (pluginId, key, value) => {
-        const fullKey = `plugin:${pluginId}:${key}`;
-        const oldValue = JSON.parse(localStorage.getItem(fullKey) || 'null');
-        localStorage.setItem(fullKey, JSON.stringify(value));
-        bus.emit('storage:change', { key: fullKey, value, oldValue, pluginId });
-      }
+    getPlugin: getContainer,
+    getContainer,
+    removeContainer,
+    makeDraggable,
+    makeResizable,
+    injectCSS,
+    removeCSS,
+    getOrCreateToolbar,
+    getOrCreateSidebar,
+    getOrCreateContextMenu,
+    addContextMenuItem,
+    notify,
+    showModal,
+    registerHook(name, handler, owner = currentPluginId || 'core') {
+      if (typeof handler !== 'function') throw new TypeError('Hook handler must be a function.');
+      if (!hooks.has(name)) hooks.set(name, new Set());
+      const record = { handler, owner };
+      hooks.get(name).add(record);
+      trackCleanup(owner, () => hooks.get(name)?.delete(record));
+      return () => hooks.get(name)?.delete(record);
     },
-
-    getPluginId: () => currentPluginId,
-
-    // ── Container ──
-    get container() {
-      if (!currentPluginId) return boardEl;
-
-      if (!pluginContainers.has(currentPluginId)) {
-        const div = document.createElement('div');
-        div.className = 'bb-plugin-container bb-plugin-box';
-        div.dataset.pluginId = currentPluginId;
-        div.setAttribute('data-plugin-id', currentPluginId);
-        div.style.position = 'absolute';
-        div.style.left = '20px';
-        div.style.top = '20px';
-        div.style.minWidth = '120px';
-        div.style.minHeight = '80px';
-        div.style.overflow = 'hidden';
-        div.style.display = 'flex';
-        div.style.flexDirection = 'column';
-
-        boardEl.appendChild(div);
-
-        this.makeDraggable(div);
-        this.makeResizable(div);
-
-        pluginContainers.set(currentPluginId, div);
-        pluginState.set(currentPluginId, { mode: 'floating' });
-      }
-
-      return pluginContainers.get(currentPluginId);
-    },
-
-    _setCurrentPlugin(id) {
-      currentPluginId = id;
-    },
-
-    getContainer(pluginId) {
-      return pluginContainers.get(pluginId) || null;
-    },
-
-    removeContainer(pluginId) {
-      const el = pluginContainers.get(pluginId);
-      if (el) el.remove();
-      pluginContainers.delete(pluginId);
-      pluginState.delete(pluginId);
-
-      const style = pluginStyles.get(pluginId);
-      if (style) style.remove();
-      pluginStyles.delete(pluginId);
-    },
-
-    // ── CSS ──
-    injectCSS(pluginId, css, { global = false } = {}) {
-      const existing = pluginStyles.get(pluginId);
-      if (existing) existing.remove();
-
-      const style = document.createElement('style');
-      style.id = `bb-style-${pluginId}`;
-
-      if (global) {
-        // 🔓 FULL CONTROL MODE
-        style.textContent = css;
-      } else {
-        // 🔒 SAFE SCOPED MODE (default)
-        style.textContent = `
-          [data-plugin-id="${pluginId}"] {
-            font-family: system-ui, sans-serif;
-            box-sizing: border-box;
-          }
-
-          [data-plugin-id="${pluginId}"] * {
-            box-sizing: inherit;
-          }
-
-          ${css}
-        `;
-      }
-
-      document.head.appendChild(style);
-      pluginStyles.set(pluginId, style);
-      return style;
-    },
-
-    removeCSS(pluginId) {
-      const style = pluginStyles.get(pluginId);
-      if (style) style.remove();
-      pluginStyles.delete(pluginId);
-    },
-
-    // ── Hooks ──
-    registerHook(name, handler) {
-      if (!hooks[name]) hooks[name] = [];
-      hooks[name].push(handler);
-    },
-
     useHook(name, payload) {
-      if (!hooks[name]) return [];
-      return hooks[name].map(fn => fn(payload));
+      const set = hooks.get(name);
+      if (!set) return [];
+      return [...set].map(({ handler, owner }) => {
+        try { return handler(payload); }
+        catch (err) { emitCoreError({ type: 'hook', hook: name, owner, error: serializeError(err) }); return undefined; }
+      });
     },
-
     removeHook(name, handler) {
-      if (!hooks[name]) return;
-      hooks[name] = hooks[name].filter(fn => fn !== handler);
+      const set = hooks.get(name);
+      if (!set) return;
+      for (const record of [...set]) if (record.handler === handler) set.delete(record);
     },
-
-    // ── Notifications ──
-    notify(message, type = 'info', duration = 3000) {
-      const colors = {
-        info: '#3498db',
-        success: '#2ecc71',
-        warning: '#f39c12',
-        error: '#e74c3c'
-      };
-
-      const toast = document.createElement('div');
-      toast.textContent = message;
-      toast.style.cssText = `
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 12px 20px;
-        border-radius: 8px;
-        color: #fff;
-        z-index: 99999;
-        background: ${colors[type]};
-      `;
-
-      document.body.appendChild(toast);
-      if (duration > 0) setTimeout(() => toast.remove(), duration);
-      return toast;
+    getPluginId: () => currentPluginId,
+    _setCurrentPlugin(id) { currentPluginId = id ? normalizePluginId(id) : null; },
+    _setPluginState(id, patch) { pluginState.set(normalizePluginId(id), { ...(pluginState.get(normalizePluginId(id)) || {}), ...patch }); },
+    _getPluginState(id) { return { ...(pluginState.get(normalizePluginId(id)) || {}) }; },
+    _recordPluginError(id, err) {
+      const pluginId = normalizePluginId(id);
+      const list = pluginErrors.get(pluginId) || [];
+      list.push({ at: Date.now(), error: serializeError(err) });
+      pluginErrors.set(pluginId, list.slice(-10));
+      const state = pluginState.get(pluginId) || {};
+      pluginState.set(pluginId, { ...state, status: 'failed', crashes: (state.crashes || 0) + 1, lastError: serializeError(err) });
+      const el = pluginContainers.get(pluginId);
+      if (el) el.dataset.bbError = 'true';
     },
-
-    // ── Modal ──
-    showModal({ title, content, onClose }) {
-      const overlay = document.createElement('div');
-      overlay.style.cssText = `
-        position: fixed;
-        inset: 0;
-        background: rgba(0,0,0,0.5);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        z-index: 100001;
-      `;
-
-      const modal = document.createElement('div');
-      modal.style.cssText = `
-        background: #fff;
-        border-radius: 12px;
-        padding: 24px;
-      `;
-
-      if (title) {
-        const h = document.createElement('h3');
-        h.textContent = title;
-        modal.appendChild(h);
-      }
-
-      if (typeof content === 'string') modal.innerHTML += content;
-      else modal.appendChild(content);
-
-      overlay.appendChild(modal);
-      document.body.appendChild(overlay);
-
-      const close = () => {
-        overlay.remove();
-        onClose && onClose();
-      };
-
-      overlay.onclick = (e) => {
-        if (e.target === overlay) close();
-      };
-
-      return { close };
-    },
-
-    // ── Toolbar ──
-    registerToolbarButton({ id, label, onClick }) {
-      const toolbar = getOrCreateToolbar();
-      if (document.getElementById(`bb-btn-${id}`)) return;
-
-      const btn = document.createElement('button');
-      btn.id = `bb-btn-${id}`;
-      btn.textContent = label;
-      btn.onclick = onClick;
-
-      toolbar.appendChild(btn);
-    },
-
-    removeToolbarButton(id) {
-      document.getElementById(`bb-btn-${id}`)?.remove();
-    },
-
-    // ── Sidebar ──
-    registerSidebarItem({ id, icon, onClick }) {
-      const sidebar = getOrCreateSidebar();
-      const item = document.createElement('div');
-      item.id = `bb-sidebar-${id}`;
-      item.textContent = icon || '📌';
-      item.onclick = onClick;
-      sidebar.appendChild(item);
-      return item;
-    },
-
-    removeSidebarItem(id) {
-      document.getElementById(`bb-sidebar-${id}`)?.remove();
-    },
-
-    // ── Context Menu ──
-    registerContextMenuItem(label, callback) {
-      const menu = getOrCreateContextMenu();
-      const item = document.createElement('div');
-      item.textContent = label;
-      item.className = 'bb-cm-item';
-      item.onclick = (e) => {
-        e.stopPropagation();
-        menu.style.display = 'none';
-        callback();
-      };
-      menu.appendChild(item);
-    },
-
-    // ── Keyboard ──
-    registerShortcut(keys, callback) {
-      const parts = keys.toLowerCase().split('+');
-      const key = parts.pop();
-
-      const handler = (e) => {
-        if (e.key.toLowerCase() === key) callback(e);
-      };
-
-      document.addEventListener('keydown', handler);
-      return () => document.removeEventListener('keydown', handler);
-    },
-
-    // ── Drag ──
-    makeDraggable(el, handle) {
-      const dragHandle = handle || el;
-      let offsetX = 0, offsetY = 0;
-      let dragging = false;
-
-      dragHandle.style.cursor = 'move';
-
-      function onMove(e) {
-        if (!dragging) return;
-        el.style.left = (e.clientX - offsetX) + 'px';
-        el.style.top = (e.clientY - offsetY) + 'px';
-      }
-
-      function onUp() {
-        dragging = false;
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        bus.emit('plugin:dragend', { el });
-      }
-
-      dragHandle.addEventListener('mousedown', (e) => {
-        const id = el.dataset.pluginId;
-        if (el.dataset.docked === "true" && id) {
-          undockPlugin(id);
-        }
-
-        dragging = true;
-        offsetX = e.clientX - el.offsetLeft;
-        offsetY = e.clientY - el.offsetTop;
-        el.style.zIndex = Date.now();
-
-        bus.emit('plugin:dragstart', { el });
-
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-    },
-
-    // ── Resize ──
-    makeResizable(el) {
-      const handle = document.createElement('div');
-      handle.style.cssText = `
-        position: absolute;
-        right: 0;
-        bottom: 0;
-        width: 14px;
-        height: 14px;
-        cursor: nwse-resize;
-      `;
-      el.appendChild(handle);
-
-      handle.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        const startX = e.clientX;
-        const startY = e.clientY;
-        const startW = el.offsetWidth;
-        const startH = el.offsetHeight;
-
-        function onMove(e) {
-          el.style.width = startW + (e.clientX - startX) + 'px';
-          el.style.height = startH + (e.clientY - startY) + 'px';
-        }
-
-        function onUp() {
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-        }
-
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-      });
-    },
-
-    // ── Utils ──
-    debounce(fn, delay = 250) {
-      let timer;
-      return (...args) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => fn(...args), delay);
-      };
-    },
-
-    throttle(fn, limit = 100) {
-      let inThrottle = false;
-      return (...args) => {
-        if (!inThrottle) {
-          fn(...args);
-          inThrottle = true;
-          setTimeout(() => inThrottle = false, limit);
-        }
-      };
+    _cleanupPlugin: runPluginCleanups,
+    _trackCleanup: trackCleanup,
+    _createSandbox: createPluginSandbox,
+    _normalizePluginId: normalizePluginId,
+    get container() {
+      return currentPluginId ? createContainer(currentPluginId) : boardEl;
     }
   };
+
+  function createPluginSandbox(pluginId, manifest = {}) {
+    const id = normalizePluginId(pluginId);
+    const permissions = getPermissions(id);
+    const isSystem = !!permissions.system;
+    const pluginBus = Object.freeze({
+      on(event, callback) { assertPermission(id, 'bus'); return bus.on(event, callback, id); },
+      once(event, callback) { assertPermission(id, 'bus'); return bus.once(event, callback, id); },
+      off(event, callback) { return bus.off(event, callback, id); },
+      emit(event, data) { assertPermission(id, 'bus'); return bus.emit(event, { ...(data || {}), __source: id }); }
+    });
+
+    const sandbox = {
+      version: CORE_VERSION,
+      pluginId: id,
+      meta: Object.freeze({ ...(manifest.meta || {}) }),
+      permissions: Object.freeze({ ...permissions }),
+      getPluginId: () => id,
+      get container() { assertPermission(id, 'ui'); return createContainer(id); },
+      get boardEl() {
+        // Legacy compatibility for trusted/system plugins. Normal plugins should not use this.
+        if (!isSystem && !permissions.rawBoard) console.warn(`[API] ${id}: direct boardEl access is legacy. Use api.container instead.`);
+        return boardEl;
+      },
+      bus: pluginBus,
+      storage: createNamespacedStorage(id),
+      notify,
+      showModal,
+      injectCSS(css, opts = {}) { return injectCSS(id, css, opts); },
+      removeCSS() { return removeCSS(id); },
+      onCleanup(fn) { return trackCleanup(id, fn); },
+      setTimeout(fn, delay = 0) {
+        const timerId = window.setTimeout(() => { try { fn(); } catch (err) { coreApi._recordPluginError(id, err); } }, delay);
+        if (!pluginTimers.has(id)) pluginTimers.set(id, new Set());
+        pluginTimers.get(id).add({ type: 'timeout', id: timerId });
+        return timerId;
+      },
+      setInterval(fn, delay = 1000) {
+        const timerId = window.setInterval(() => { try { fn(); } catch (err) { coreApi._recordPluginError(id, err); } }, delay);
+        if (!pluginTimers.has(id)) pluginTimers.set(id, new Set());
+        pluginTimers.get(id).add({ type: 'interval', id: timerId });
+        return timerId;
+      },
+      clearTimeout(timerId) { clearTimeout(timerId); },
+      clearInterval(timerId) { clearInterval(timerId); },
+      registerHook(name, handler) { assertPermission(id, 'hooks'); return coreApi.registerHook(name, handler, id); },
+      useHook(name, payload) { assertPermission(id, 'hooks'); return coreApi.useHook(name, payload); },
+      addContextMenuItem(label, handler) { assertPermission(id, 'ui'); return addContextMenuItem(label, handler, id); },
+      makeDraggable(el) { assertPermission(id, 'layout'); return makeDraggable(el, id); },
+      makeResizable(el) { assertPermission(id, 'layout'); return makeResizable(el, id); },
+      mountPlugin(targetPluginId, targetEl) { return mountPlugin(targetPluginId, targetEl); },
+      undockPlugin(targetPluginId) { return undockPlugin(targetPluginId); },
+      updatePlugin(targetPluginId, updater) { return updatePlugin(targetPluginId, updater); },
+      getContainer(targetPluginId = id) {
+        if (targetPluginId !== id && !hasPermission(id, 'modifyOthers')) return null;
+        return getContainer(targetPluginId);
+      },
+      getPlugin(targetPluginId = id) { return this.getContainer(targetPluginId); },
+      copyText(text) {
+        assertPermission(id, 'clipboard', 'clipboard');
+        return navigator.clipboard?.writeText(String(text));
+      },
+      fetch(url, options) {
+        assertPermission(id, 'network', 'network');
+        return fetch(url, options);
+      }
+    };
+
+    if (isSystem) {
+      // System plugins like Plugin Manager need these for backwards compatibility.
+      sandbox.registry = coreApi.registry;
+      sandbox.installPlugin = (...args) => coreApi.installPlugin?.(...args);
+      sandbox.togglePlugin = (...args) => coreApi.togglePlugin?.(...args);
+      sandbox.deletePlugin = (...args) => coreApi.deletePlugin?.(...args);
+      sandbox.reloadPlugin = (...args) => coreApi.reloadPlugin?.(...args);
+      sandbox.restart = (...args) => coreApi.restart?.(...args);
+      sandbox.registerUI = (...args) => coreApi.registerUI?.(...args);
+      sandbox.setPluginPermissions = (...args) => coreApi.setPluginPermissions?.(...args);
+    }
+
+    return Object.freeze(sandbox);
+  }
+
+  return coreApi;
+}
+
+function serializeError(err) {
+  return { name: err?.name || 'Error', message: err?.message || String(err), stack: err?.stack || null };
 }
