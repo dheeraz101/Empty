@@ -72,6 +72,25 @@
   <body>
     <noscript>Blank Board needs JavaScript enabled.</noscript>
     <main id="board" aria-label="Blank Board workspace"></main>
+
+    <script>
+      window.__blankBoardPMReady = false;
+      window.__blankBoardPendingPMOpen = false;
+
+      document.addEventListener('contextmenu', (event) => {
+        const board = document.getElementById('board');
+
+        if (!board || !board.contains(event.target)) return;
+        if (event.target.closest('.pm-root')) return;
+
+        if (!window.__blankBoardPMReady) {
+          event.preventDefault();
+          window.__blankBoardPendingPMOpen = true;
+          window.dispatchEvent(new CustomEvent('blank-board:open-plugin-manager-requested'));
+        }
+      }, true);
+    </script>
+
     <script type="module" src="./core/core.js"></script>
   </body>
 </html>
